@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+from tempfile import NamedTemporaryFile
 
 
 def raise_walk_error(error):
@@ -108,6 +109,31 @@ def compare(old, new):
     }
 
 
+def write_manifest(path, manifest):
+    serialized = json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+    pending = None
+    try:
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+            prefix=".folder-snapshot-", suffix=".tmp", delete=False,
+        ) as target:
+            pending = Path(target.name)
+            target.write(serialized)
+            target.flush()
+            os.fsync(target.fileno())
+
+        if os.name == "nt":
+            # On Windows rename fails if another writer has claimed the destination.
+            pending.rename(path)
+            pending = None
+        else:
+            # On POSIX rename can replace a file. A hard link creates a new name exclusively.
+            os.link(pending, path)
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Klasör içeriğini kaydeder ve iki kaydı karşılaştırır.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -126,9 +152,7 @@ def main(argv=None):
             if os.path.lexists(args.manifest):
                 raise FileExistsError(f"Çıktı dosyası zaten var: {args.manifest}")
             manifest = snapshot(args.directory, args.exclude)
-            serialized = json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
-            with args.manifest.open("x", encoding="utf-8", newline="\n") as target:
-                target.write(serialized)
+            write_manifest(args.manifest, manifest)
             print(f"{len(manifest['files'])} dosya kaydedildi.")
             return 0
 

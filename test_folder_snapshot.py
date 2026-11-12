@@ -1,9 +1,11 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from folder_snapshot import compare, main, read_manifest, snapshot
 
@@ -55,6 +57,32 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(main(["create", str(self.root), str(right)]), 0)
             self.assertEqual(main(["create", str(self.root), str(left)]), 2)
         self.assertEqual(left.read_bytes(), right.read_bytes())
+
+    def test_failed_write_leaves_no_output_and_can_retry(self):
+        (self.root / "file.txt").touch()
+        output = self.workspace / "snapshot.json"
+        command = ["create", str(self.root), str(output)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with patch("folder_snapshot.os.fsync", side_effect=OSError("simulated disk write failure")):
+                self.assertEqual(main(command), 2)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(self.workspace.iterdir()), [self.root])
+            self.assertEqual(main(command), 0)
+        self.assertEqual(list(read_manifest(output)), ["file.txt"])
+
+    def test_late_collision_preserves_new_destination_and_removes_temporary_file(self):
+        output = self.workspace / "snapshot.json"
+        sync_file = os.fsync
+
+        def create_competing_output(descriptor):
+            output.write_text("other writer", encoding="utf-8")
+            sync_file(descriptor)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with patch("folder_snapshot.os.fsync", side_effect=create_competing_output):
+                self.assertEqual(main(["create", str(self.root), str(output)]), 2)
+        self.assertEqual(output.read_text(encoding="utf-8"), "other writer")
+        self.assertEqual(set(self.workspace.iterdir()), {self.root, output})
 
     def test_diff_reports_changes_with_exit_one(self):
         left, right = self.workspace / "one.json", self.workspace / "two.json"
